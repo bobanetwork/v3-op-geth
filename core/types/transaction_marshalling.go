@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 // txJSON is the JSON representation of transactions.
@@ -281,6 +282,9 @@ func (t *Transaction) UnmarshalJSON(input []byte) error {
 			}
 		}
 	case DepositTxType:
+		log.Debug("MMDBG op-geth parsing DepositTx")
+		// Previously needed to ignore an unwanted Nonce field. Now fixed in Erigon.
+
 		if dec.AccessList != nil || dec.V != nil || dec.R != nil || dec.S != nil || dec.MaxFeePerGas != nil ||
 			dec.MaxPriorityFeePerGas != nil || dec.GasPrice != nil || (dec.Nonce != nil && *dec.Nonce != 0) {
 			return errors.New("unexpected field(s) in deposit transaction")
