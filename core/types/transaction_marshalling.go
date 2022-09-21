@@ -282,9 +282,6 @@ func (t *Transaction) UnmarshalJSON(input []byte) error {
 			}
 		}
 	case DepositTxType:
-		log.Debug("MMDBG op-geth parsing DepositTx")
-		// Previously needed to ignore an unwanted Nonce field. Now fixed in Erigon.
-
 		if dec.AccessList != nil || dec.V != nil || dec.R != nil || dec.S != nil || dec.MaxFeePerGas != nil ||
 			dec.MaxPriorityFeePerGas != nil || dec.GasPrice != nil || (dec.Nonce != nil && *dec.Nonce != 0) {
 			return errors.New("unexpected field(s) in deposit transaction")
@@ -317,6 +314,8 @@ func (t *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.IsSystemTx != nil {
 			itx.IsSystemTransaction = *dec.IsSystemTx
 		}
+		// DEBUG level messages are not printed from op-geth when called by op-node
+		log.Info("MMDBG op-geth parsed DepositTransaction", "itx", itx)
 	default:
 		return ErrTxTypeNotSupported
 	}
