@@ -39,12 +39,15 @@ type PayloadAttributesV1 struct {
 	// NoTxPool is a field for rollups: if true, the no transactions are taken out of the tx-pool,
 	// only transactions from the above Transactions list will be included.
 	NoTxPool bool `json:"noTxPool,omitempty" gencodec:"optional"`
+	// GasLimit is a field for rollups: if set, this sets the exact gas limit the block produced with.
+	GasLimit *uint64 `json:"gasLimit,omitempty" gencodec:"optional"`
 }
 
 // JSON type overrides for PayloadAttributesV1.
 type payloadAttributesMarshaling struct {
 	Timestamp    hexutil.Uint64
 	Transactions []hexutil.Bytes
+	GasLimit     *hexutil.Uint64
 }
 
 //go:generate go run github.com/fjl/gencodec -type ExecutableDataV1 -field-override executableDataMarshaling -out gen_ed.go
@@ -143,9 +146,11 @@ func decodeTransactions(enc [][]byte) ([]*types.Transaction, error) {
 
 // ExecutableDataToBlock constructs a block from executable data.
 // It verifies that the following fields:
-// 		len(extraData) <= 32
-// 		uncleHash = emptyUncleHash
-// 		difficulty = 0
+//
+//	len(extraData) <= 32
+//	uncleHash = emptyUncleHash
+//	difficulty = 0
+//
 // and that the blockhash of the constructed block matches the parameters.
 func ExecutableDataToBlock(params ExecutableDataV1) (*types.Block, error) {
 	txs, err := decodeTransactions(params.Transactions)

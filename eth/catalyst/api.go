@@ -34,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -105,7 +106,7 @@ type ConsensusAPI struct {
 	//     problematic, so we will only track the head chain segment of a bad
 	//     chain to allow discarding progressing bad chains and side chains,
 	//     without tracking too much bad data.
-	invalidBlocksHits map[common.Hash]int           // Emhemeral cache to track invalid blocks and their hit count
+	invalidBlocksHits map[common.Hash]int           // Ephemeral cache to track invalid blocks and their hit count
 	invalidTipsets    map[common.Hash]*types.Header // Ephemeral cache to track invalid tipsets and their bad ancestor
 	invalidLock       sync.Mutex                    // Protects the invalid maps from concurrent access
 
@@ -120,6 +121,7 @@ type ConsensusAPI struct {
 	lastNewPayloadLock   sync.Mutex
 
 	forkchoiceLock sync.Mutex // Lock for the forkChoiceUpdated method
+	newPayloadLock sync.Mutex // Lock for the NewPayload method
 }
 
 // NewConsensusAPI creates a new consensus api for the given backend.
@@ -145,15 +147,19 @@ func NewConsensusAPI(eth *eth.Ethereum) *ConsensusAPI {
 }
 
 // ForkchoiceUpdatedV1 has several responsibilities:
-// If the method is called with an empty head block:
-// 		we return success, which can be used to check if the engine API is enabled
-// If the total difficulty was not reached:
-// 		we return INVALID
-// If the finalizedBlockHash is set:
-// 		we check if we have the finalizedBlockHash in our db, if not we start a sync
-// We try to set our blockchain to the headBlock
-// If there are payloadAttributes:
-// 		we try to assemble a block with the payloadAttributes and return its payloadID
+//
+// We try to set our blockchain to the headBlock.
+//
+// If the method is called with an empty head block: we return success, which can be used
+// to check if the engine API is enabled.
+//
+// If the total difficulty was not reached: we return INVALID.
+//
+// If the finalizedBlockHash is set: we check if we have the finalizedBlockHash in our db,
+// if not we start a sync.
+//
+// If there are payloadAttributes: we try to assemble a block with the payloadAttributes
+// and return its payloadID.
 func (api *ConsensusAPI) ForkchoiceUpdatedV1(update beacon.ForkchoiceStateV1, payloadAttributes *beacon.PayloadAttributesV1) (beacon.ForkChoiceResponse, error) {
 	api.forkchoiceLock.Lock()
 	defer api.forkchoiceLock.Unlock()
@@ -277,37 +283,35 @@ func (api *ConsensusAPI) ForkchoiceUpdatedV1(update beacon.ForkchoiceStateV1, pa
 	}
 	// If payload generation was requested, create a new block to be potentially
 	// sealed by the beacon client. The payload will be requested later, and we
-	// might replace it arbitrarily many times in between.
+	// will replace it arbitrarily many times in between.
 	if payloadAttributes != nil {
-		// Decode forceTxs. TODO: How to handle tx validity.
-		forceTxs := make(types.Transactions, 0, len(payloadAttributes.Transactions))
+		if api.eth.BlockChain().Config().Optimism != nil && payloadAttributes.GasLimit == nil {
+			return beacon.STATUS_INVALID, beacon.InvalidPayloadAttributes.With(errors.New("gasLimit parameter is required"))
+		}
+		transactions := make(types.Transactions, 0, len(payloadAttributes.Transactions))
 		for i, otx := range payloadAttributes.Transactions {
 			var tx types.Transaction
 			if err := tx.UnmarshalBinary(otx); err != nil {
 				return beacon.STATUS_INVALID, fmt.Errorf("transaction %d is not valid: %v", i, err)
 			}
-			forceTxs = append(forceTxs, &tx)
+			transactions = append(transactions, &tx)
 		}
-		// Create an empty block first which can be used as a fallback
-		empty, err := api.eth.Miner().GetSealingBlockSync(update.HeadBlockHash, payloadAttributes.Timestamp, payloadAttributes.SuggestedFeeRecipient, payloadAttributes.Random, true, forceTxs)
+		args := &miner.BuildPayloadArgs{
+			Parent:       update.HeadBlockHash,
+			Timestamp:    payloadAttributes.Timestamp,
+			FeeRecipient: payloadAttributes.SuggestedFeeRecipient,
+			Random:       payloadAttributes.Random,
+			NoTxPool:     payloadAttributes.NoTxPool,
+			Transactions: transactions,
+			GasLimit:     payloadAttributes.GasLimit,
+		}
+		payload, err := api.eth.Miner().BuildPayload(args)
 		if err != nil {
-			log.Error("Failed to create empty sealing payload", "err", err)
+			log.Error("Failed to build payload", "err", err)
 			return beacon.STATUS_INVALID, beacon.InvalidPayloadAttributes.With(err)
 		}
-		if payloadAttributes.NoTxPool {
-			id := computePayloadId(update.HeadBlockHash, payloadAttributes)
-			api.localBlocks.put(id, &payload{block: empty, result: nil, done: true}) // we don't let it default to "empty", we just mark the thing as done.
-			return valid(&id), nil
-		}
-		// Send a request to generate a full block in the background.
-		// The result can be obtained via the returned channel.
-		resCh, err := api.eth.Miner().GetSealingBlockAsync(update.HeadBlockHash, payloadAttributes.Timestamp, payloadAttributes.SuggestedFeeRecipient, payloadAttributes.Random, false, forceTxs)
-		if err != nil {
-			log.Error("Failed to create async sealing payload", "err", err)
-			return valid(nil), beacon.InvalidPayloadAttributes.With(err)
-		}
 		id := computePayloadId(update.HeadBlockHash, payloadAttributes)
-		api.localBlocks.put(id, &payload{empty: empty, result: resCh})
+		api.localBlocks.put(id, payload)
 		return valid(&id), nil
 	}
 	return valid(nil), nil
@@ -355,6 +359,22 @@ func (api *ConsensusAPI) GetPayloadV1(payloadID beacon.PayloadID) (*beacon.Execu
 
 // NewPayloadV1 creates an Eth1 block, inserts it in the chain, and returns the status of the chain.
 func (api *ConsensusAPI) NewPayloadV1(params beacon.ExecutableDataV1) (beacon.PayloadStatusV1, error) {
+	// The locking here is, strictly, not required. Without these locks, this can happen:
+	//
+	// 1. NewPayload( execdata-N ) is invoked from the CL. It goes all the way down to
+	//      api.eth.BlockChain().InsertBlockWithoutSetHead, where it is blocked on
+	//      e.g database compaction.
+	// 2. The call times out on the CL layer, which issues another NewPayload (execdata-N) call.
+	//    Similarly, this also get stuck on the same place. Importantly, since the
+	//    first call has not gone through, the early checks for "do we already have this block"
+	//    will all return false.
+	// 3. When the db compaction ends, then N calls inserting the same payload are processed
+	//    sequentially.
+	// Hence, we use a lock here, to be sure that the previous call has finished before we
+	// check whether we already have the block locally.
+	api.newPayloadLock.Lock()
+	defer api.newPayloadLock.Unlock()
+
 	log.Trace("Engine API request received", "method", "ExecutePayload", "number", params.Number, "hash", params.BlockHash)
 	block, err := beacon.ExecutableDataToBlock(params)
 	if err != nil {
@@ -455,6 +475,9 @@ func computePayloadId(headBlockHash common.Hash, params *beacon.PayloadAttribute
 			binary.Write(hasher, binary.BigEndian, uint64(len(tx)))
 			hasher.Write(tx)
 		}
+	}
+	if params.GasLimit != nil {
+		binary.Write(hasher, binary.BigEndian, *params.GasLimit)
 	}
 	var out beacon.PayloadID
 	copy(out[:], hasher.Sum(nil)[:8])

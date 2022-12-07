@@ -16,7 +16,18 @@
 
 package params
 
-import "math/big"
+import (
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/common"
+)
+
+var (
+	// The base fee portion of the transaction fee accumulates at this predeploy
+	OptimismBaseFeeRecipient = common.HexToAddress("0x4200000000000000000000000000000000000019")
+	// The L1 portion of the transaction fee accumulates at this predeploy
+	OptimismL1FeeRecipient = common.HexToAddress("0x420000000000000000000000000000000000001A")
+)
 
 const (
 	GasLimitBoundDivisor uint64 = 1024               // The bound divisor of the gas limit, used in update calculations.
@@ -119,9 +130,9 @@ const (
 	// Introduced in Tangerine Whistle (Eip 150)
 	CreateBySelfdestructGas uint64 = 25000
 
-	BaseFeeChangeDenominator = 8          // Bounds the amount the base fee can change between blocks.
-	ElasticityMultiplier     = 2          // Bounds the maximum gas limit an EIP-1559 block may have.
-	InitialBaseFee           = 1000000000 // Initial base fee for EIP-1559 blocks.
+	DefaultBaseFeeChangeDenominator = 8          // Bounds the amount the base fee can change between blocks.
+	DefaultElasticityMultiplier     = 2          // Bounds the maximum gas limit an EIP-1559 block may have.
+	InitialBaseFee                  = 1000000000 // Initial base fee for EIP-1559 blocks.
 
 	MaxCodeSize = 24576 // Maximum bytecode to permit for a contract
 

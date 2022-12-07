@@ -18,6 +18,7 @@ package ethapi
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -25,6 +26,9 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/tyler-smith/go-bip39"
+
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
@@ -45,8 +49,9 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/tyler-smith/go-bip39"
 )
+
+var ErrHeaderNotFound = fmt.Errorf("header %w", ethereum.NotFound)
 
 // EthereumAPI provides an API to access Ethereum related information.
 type EthereumAPI struct {
@@ -455,7 +460,7 @@ func (s *PersonalAccountAPI) signTransaction(ctx context.Context, args *Transact
 // passwd isn't able to decrypt the key it fails.
 func (s *PersonalAccountAPI) SendTransaction(ctx context.Context, args TransactionArgs, passwd string) (common.Hash, error) {
 	if args.Nonce == nil {
-		// Hold the addresse's mutex around signing to prevent concurrent assignment of
+		// Hold the mutex around signing to prevent concurrent assignment of
 		// the same nonce to multiple accounts.
 		s.nonceLock.LockAddr(args.from())
 		defer s.nonceLock.UnlockAddr(args.from())
@@ -674,15 +679,19 @@ func (s *BlockChainAPI) GetProof(ctx context.Context, address common.Address, st
 	}
 
 	// create the proof for the storageKeys
-	for i, key := range storageKeys {
+	for i, hexKey := range storageKeys {
+		key, err := decodeHash(hexKey)
+		if err != nil {
+			return nil, err
+		}
 		if storageTrie != nil {
-			proof, storageError := state.GetStorageProof(address, common.HexToHash(key))
+			proof, storageError := state.GetStorageProof(address, key)
 			if storageError != nil {
 				return nil, storageError
 			}
-			storageProof[i] = StorageResult{key, (*hexutil.Big)(state.GetState(address, common.HexToHash(key)).Big()), toHexSlice(proof)}
+			storageProof[i] = StorageResult{hexKey, (*hexutil.Big)(state.GetState(address, key).Big()), toHexSlice(proof)}
 		} else {
-			storageProof[i] = StorageResult{key, &hexutil.Big{}, []string{}}
+			storageProof[i] = StorageResult{hexKey, &hexutil.Big{}, []string{}}
 		}
 	}
 
@@ -701,6 +710,25 @@ func (s *BlockChainAPI) GetProof(ctx context.Context, address common.Address, st
 		StorageHash:  storageHash,
 		StorageProof: storageProof,
 	}, state.Error()
+}
+
+// decodeHash parses a hex-encoded 32-byte hash. The input may optionally
+// be prefixed by 0x and can have an byte length up to 32.
+func decodeHash(s string) (common.Hash, error) {
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		s = s[2:]
+	}
+	if (len(s) & 1) > 0 {
+		s = "0" + s
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("hex string invalid")
+	}
+	if len(b) > 32 {
+		return common.Hash{}, fmt.Errorf("hex string too long, want at most 32 bytes")
+	}
+	return common.BytesToHash(b), nil
 }
 
 // GetHeaderByNumber returns the requested canonical block header.
@@ -731,10 +759,10 @@ func (s *BlockChainAPI) GetHeaderByHash(ctx context.Context, hash common.Hash) m
 }
 
 // GetBlockByNumber returns the requested canonical block.
-// * When blockNr is -1 the chain head is returned.
-// * When blockNr is -2 the pending chain head is returned.
-// * When fullTx is true all transactions in the block are returned, otherwise
-//   only the transaction hash is returned.
+//   - When blockNr is -1 the chain head is returned.
+//   - When blockNr is -2 the pending chain head is returned.
+//   - When fullTx is true all transactions in the block are returned, otherwise
+//     only the transaction hash is returned.
 func (s *BlockChainAPI) GetBlockByNumber(ctx context.Context, number rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
 	block, err := s.b.BlockByNumber(ctx, number)
 	if block != nil && err == nil {
@@ -821,12 +849,16 @@ func (s *BlockChainAPI) GetCode(ctx context.Context, address common.Address, blo
 // GetStorageAt returns the storage from the state at the given address, key and
 // block number. The rpc.LatestBlockNumber and rpc.PendingBlockNumber meta block
 // numbers are also allowed.
-func (s *BlockChainAPI) GetStorageAt(ctx context.Context, address common.Address, key string, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
+func (s *BlockChainAPI) GetStorageAt(ctx context.Context, address common.Address, hexKey string, blockNrOrHash rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
 	state, _, err := s.b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return nil, err
 	}
-	res := state.GetState(address, common.HexToHash(key))
+	key, err := decodeHash(hexKey)
+	if err != nil {
+		return nil, fmt.Errorf("unable to decode storage key: %s", err)
+	}
+	res := state.GetState(address, key)
 	return res[:], state.Error()
 }
 
@@ -1014,7 +1046,11 @@ func (e *revertError) ErrorData() interface{} {
 // useful to execute and retrieve values.
 func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride) (hexutil.Bytes, error) {
 	result, err := DoCall(ctx, s.b, args, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
-	if err != nil {
+	if errors.Is(err, ethereum.NotFound) && s.b.HistoricalRPCService() != nil {
+		var histResult hexutil.Bytes
+		err = s.b.HistoricalRPCService().CallContext(ctx, &histResult, "eth_call", args, blockNrOrHash, overrides)
+		return histResult, err
+	} else if err != nil {
 		return nil, err
 	}
 	// If the result contains a revert reason, try to unpack and return it.
@@ -1070,7 +1106,7 @@ func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNr
 		available := new(big.Int).Set(balance)
 		if args.Value != nil {
 			if args.Value.ToInt().Cmp(available) >= 0 {
-				return 0, errors.New("insufficient funds for transfer")
+				return 0, core.ErrInsufficientFundsForTransfer
 			}
 			available.Sub(available, args.Value.ToInt())
 		}
@@ -1151,7 +1187,17 @@ func (s *BlockChainAPI) EstimateGas(ctx context.Context, args TransactionArgs, b
 	if blockNrOrHash != nil {
 		bNrOrHash = *blockNrOrHash
 	}
-	return DoEstimateGas(ctx, s.b, args, bNrOrHash, s.b.RPCGasCap())
+
+	res, err := DoEstimateGas(ctx, s.b, args, bNrOrHash, s.b.RPCGasCap())
+	if errors.Is(err, ethereum.NotFound) && s.b.HistoricalRPCService() != nil {
+		var result hexutil.Uint64
+		err := s.b.HistoricalRPCService().CallContext(ctx, &result, "eth_estimateGas", args, blockNrOrHash)
+		return result, err
+	} else if err != nil {
+		return 0, err
+	}
+
+	return res, err
 }
 
 // RPCMarshalHeader converts the given header to the RPC output .
@@ -1636,6 +1682,12 @@ func (s *TransactionAPI) GetTransactionReceipt(ctx context.Context, hash common.
 		"logsBloom":         receipt.Bloom,
 		"type":              hexutil.Uint(tx.Type()),
 	}
+	if s.b.ChainConfig().Optimism != nil && !tx.IsDepositTx() {
+		fields["l1GasPrice"] = (*hexutil.Big)(receipt.L1GasPrice)
+		fields["l1GasUsed"] = (*hexutil.Big)(receipt.L1GasUsed)
+		fields["l1Fee"] = (*hexutil.Big)(receipt.L1Fee)
+		fields["l1FeeScalar"] = receipt.FeeScalar.String()
+	}
 	// Assign the effective gas price paid
 	if !s.b.ChainConfig().IsLondon(bigblock) {
 		fields["effectiveGasPrice"] = hexutil.Uint64(tx.GasPrice().Uint64())
@@ -1718,7 +1770,7 @@ func (s *TransactionAPI) SendTransaction(ctx context.Context, args TransactionAr
 	}
 
 	if args.Nonce == nil {
-		// Hold the addresse's mutex around signing to prevent concurrent assignment of
+		// Hold the mutex around signing to prevent concurrent assignment of
 		// the same nonce to multiple accounts.
 		s.nonceLock.LockAddr(args.from())
 		defer s.nonceLock.UnlockAddr(args.from())
