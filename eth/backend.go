@@ -199,17 +199,17 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	)
 	// Override the chain config with provided settings.
 	var overrides core.ChainOverrides
-	if config.OverrideTerminalTotalDifficulty != nil {
-		overrides.OverrideTerminalTotalDifficulty = config.OverrideTerminalTotalDifficulty
+	if config.OverrideShanghai != nil {
+		overrides.OverrideShanghai = config.OverrideShanghai
 	}
 	if config.OverrideOptimismBedrock != nil {
 		overrides.OverrideOptimismBedrock = config.OverrideOptimismBedrock
 	}
+	if config.OverrideOptimismRegolith != nil {
+		overrides.OverrideOptimismRegolith = config.OverrideOptimismRegolith
+	}
 	if config.OverrideOptimism != nil {
 		overrides.OverrideOptimism = config.OverrideOptimism
-	}
-	if config.OverrideTerminalTotalDifficultyPassed != nil {
-		overrides.OverrideTerminalTotalDifficultyPassed = config.OverrideTerminalTotalDifficultyPassed
 	}
 	eth.blockchain, err = core.NewBlockChain(chainDb, cacheConfig, config.Genesis, &overrides, eth.engine, vmConfig, eth.shouldPreserve, &config.TxLookupLimit)
 	if err != nil {
@@ -220,6 +220,10 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		eth.networkID = config.NetworkId
 	}
 	log.Info("Initialising Ethereum protocol", "network", config.NetworkId, "dbversion", dbVer)
+
+	if eth.blockchain.Config().Optimism != nil { // Optimism Bedrock depends on Merge functionality
+		eth.merger.FinalizePoS()
+	}
 
 	eth.bloomIndexer.Start(eth.blockchain)
 
@@ -369,18 +373,6 @@ func (s *Ethereum) Etherbase() (eb common.Address, err error) {
 	if etherbase != (common.Address{}) {
 		return etherbase, nil
 	}
-	if wallets := s.AccountManager().Wallets(); len(wallets) > 0 {
-		if accounts := wallets[0].Accounts(); len(accounts) > 0 {
-			etherbase := accounts[0].Address
-
-			s.lock.Lock()
-			s.etherbase = etherbase
-			s.lock.Unlock()
-
-			log.Info("Etherbase automatically configured", "address", etherbase)
-			return etherbase, nil
-		}
-	}
 	return common.Address{}, fmt.Errorf("etherbase must be explicitly specified")
 }
 
@@ -496,7 +488,7 @@ func (s *Ethereum) StartMining(threads int) error {
 		// introduced to speed sync times.
 		atomic.StoreUint32(&s.handler.acceptTxs, 1)
 
-		go s.miner.Start(eb)
+		go s.miner.Start()
 	}
 	return nil
 }

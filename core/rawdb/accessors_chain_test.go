@@ -27,10 +27,12 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -113,8 +115,8 @@ func TestBlockStorage(t *testing.T) {
 	block := types.NewBlockWithHeader(&types.Header{
 		Extra:       []byte("test block"),
 		UncleHash:   types.EmptyUncleHash,
-		TxHash:      types.EmptyRootHash,
-		ReceiptHash: types.EmptyRootHash,
+		TxHash:      types.EmptyTxsHash,
+		ReceiptHash: types.EmptyReceiptsHash,
 	})
 	if entry := ReadBlock(db, block.Hash(), block.NumberU64()); entry != nil {
 		t.Fatalf("Non existent block returned: %v", entry)
@@ -161,8 +163,8 @@ func TestPartialBlockStorage(t *testing.T) {
 	block := types.NewBlockWithHeader(&types.Header{
 		Extra:       []byte("test block"),
 		UncleHash:   types.EmptyUncleHash,
-		TxHash:      types.EmptyRootHash,
-		ReceiptHash: types.EmptyRootHash,
+		TxHash:      types.EmptyTxsHash,
+		ReceiptHash: types.EmptyReceiptsHash,
 	})
 	// Store a header and check that it's not recognized as a block
 	WriteHeader(db, block.Header())
@@ -198,8 +200,8 @@ func TestBadBlockStorage(t *testing.T) {
 		Number:      big.NewInt(1),
 		Extra:       []byte("bad block"),
 		UncleHash:   types.EmptyUncleHash,
-		TxHash:      types.EmptyRootHash,
-		ReceiptHash: types.EmptyRootHash,
+		TxHash:      types.EmptyTxsHash,
+		ReceiptHash: types.EmptyReceiptsHash,
 	})
 	if entry := ReadBadBlock(db, block.Hash()); entry != nil {
 		t.Fatalf("Non existent block returned: %v", entry)
@@ -216,8 +218,8 @@ func TestBadBlockStorage(t *testing.T) {
 		Number:      big.NewInt(2),
 		Extra:       []byte("bad block two"),
 		UncleHash:   types.EmptyUncleHash,
-		TxHash:      types.EmptyRootHash,
-		ReceiptHash: types.EmptyRootHash,
+		TxHash:      types.EmptyTxsHash,
+		ReceiptHash: types.EmptyReceiptsHash,
 	})
 	WriteBadBlock(db, blockTwo)
 
@@ -235,8 +237,8 @@ func TestBadBlockStorage(t *testing.T) {
 			Number:      big.NewInt(int64(n)),
 			Extra:       []byte("bad block"),
 			UncleHash:   types.EmptyUncleHash,
-			TxHash:      types.EmptyRootHash,
-			ReceiptHash: types.EmptyRootHash,
+			TxHash:      types.EmptyTxsHash,
+			ReceiptHash: types.EmptyReceiptsHash,
 		})
 		WriteBadBlock(db, block)
 	}
@@ -347,6 +349,9 @@ func TestBlockReceiptStorage(t *testing.T) {
 	tx1 := types.NewTransaction(1, common.HexToAddress("0x1"), big.NewInt(1), 1, big.NewInt(1), nil)
 	tx2 := types.NewTransaction(2, common.HexToAddress("0x2"), big.NewInt(2), 2, big.NewInt(2), nil)
 
+	header := &types.Header{
+		Number: big.NewInt(0),
+	}
 	body := &types.Body{Transactions: types.Transactions{tx1, tx2}}
 
 	// Create the two receipts to manage afterwards
@@ -378,12 +383,15 @@ func TestBlockReceiptStorage(t *testing.T) {
 	receipts := []*types.Receipt{receipt1, receipt2}
 
 	// Check that no receipt entries are in a pristine database
-	hash := common.BytesToHash([]byte{0x03, 0x14})
+	hash := header.Hash()
 	if rs := ReadReceipts(db, hash, 0, params.TestChainConfig); len(rs) != 0 {
 		t.Fatalf("non existent receipts returned: %v", rs)
 	}
 	// Insert the body that corresponds to the receipts
 	WriteBody(db, hash, 0, body)
+
+	// Insert the header that corresponds to the receipts
+	WriteHeader(db, header)
 
 	// Insert the receipt slice into the database and check presence
 	WriteReceipts(db, hash, 0, receipts)
@@ -446,8 +454,8 @@ func TestAncientStorage(t *testing.T) {
 		Number:      big.NewInt(0),
 		Extra:       []byte("test block"),
 		UncleHash:   types.EmptyUncleHash,
-		TxHash:      types.EmptyRootHash,
-		ReceiptHash: types.EmptyRootHash,
+		TxHash:      types.EmptyTxsHash,
+		ReceiptHash: types.EmptyReceiptsHash,
 	})
 	// Ensure nothing non-existent will be read
 	hash, number := block.Hash(), block.NumberU64()
@@ -698,6 +706,7 @@ func TestReadLogs(t *testing.T) {
 	body := &types.Body{Transactions: types.Transactions{tx1, tx2}}
 
 	// Create the two receipts to manage afterwards
+	depositNonce := uint64(math.MaxUint64)
 	receipt1 := &types.Receipt{
 		Status:            types.ReceiptStatusFailed,
 		CumulativeGasUsed: 1,
@@ -708,6 +717,7 @@ func TestReadLogs(t *testing.T) {
 		TxHash:          tx1.Hash(),
 		ContractAddress: common.BytesToAddress([]byte{0x01, 0x11, 0x11}),
 		GasUsed:         111111,
+		DepositNonce:    &depositNonce,
 	}
 	receipt1.Bloom = types.CreateBloom(types.Receipts{receipt1})
 
@@ -750,10 +760,6 @@ func TestReadLogs(t *testing.T) {
 		t.Fatalf("unexpected number of logs[1] returned, have %d want %d", have, want)
 	}
 
-	// Fill in log fields so we can compare their rlp encoding
-	if err := types.Receipts(receipts).DeriveFields(params.TestChainConfig, hash, 0, body.Transactions); err != nil {
-		t.Fatal(err)
-	}
 	for i, pr := range receipts {
 		for j, pl := range pr.Logs {
 			rlpHave, err := rlp.EncodeToBytes(newFullLogRLP(logs[i][j]))
@@ -769,6 +775,36 @@ func TestReadLogs(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestParseLegacyReceiptRLP(t *testing.T) {
+	// Create a gasUsed value greater than a uint64 can represent
+	gasUsed := big.NewInt(0)
+	gasUsed = gasUsed.SetUint64(math.MaxUint64)
+	gasUsed = gasUsed.Add(gasUsed, big.NewInt(math.MaxInt64))
+	sanityCheck := (&big.Int{}).SetUint64(gasUsed.Uint64())
+	require.NotEqual(t, gasUsed, sanityCheck)
+	receipt := types.LegacyOptimismStoredReceiptRLP{
+		CumulativeGasUsed: 1,
+		Logs: []*types.LogForStorage{
+			{Address: common.BytesToAddress([]byte{0x11})},
+			{Address: common.BytesToAddress([]byte{0x01, 0x11})},
+		},
+		L1GasUsed:  gasUsed,
+		L1GasPrice: gasUsed,
+		L1Fee:      gasUsed,
+		FeeScalar:  "6",
+	}
+
+	data, err := rlp.EncodeToBytes(receipt)
+	require.NoError(t, err)
+	var result storedReceiptRLP
+	err = rlp.DecodeBytes(data, &result)
+	require.NoError(t, err)
+	require.Equal(t, receipt.L1GasUsed, result.L1GasUsed)
+	require.Equal(t, receipt.L1GasPrice, result.L1GasPrice)
+	require.Equal(t, receipt.L1Fee, result.L1Fee)
+	require.Equal(t, receipt.FeeScalar, result.FeeScalar)
 }
 
 func TestDeriveLogFields(t *testing.T) {
@@ -893,8 +929,8 @@ func TestHeadersRLPStorage(t *testing.T) {
 			Number:      big.NewInt(int64(i)),
 			Extra:       []byte("test block"),
 			UncleHash:   types.EmptyUncleHash,
-			TxHash:      types.EmptyRootHash,
-			ReceiptHash: types.EmptyRootHash,
+			TxHash:      types.EmptyTxsHash,
+			ReceiptHash: types.EmptyReceiptsHash,
 			ParentHash:  pHash,
 		})
 		chain = append(chain, block)

@@ -62,6 +62,8 @@ type mockHistoricalBackend struct {
 	mock.Mock
 }
 
+// mockHistoricalBackend does not have a TraceCall, because pre-bedrock there is no debug_traceCall available
+
 func (m *mockHistoricalBackend) TraceBlockByNumber(ctx context.Context, number rpc.BlockNumber, config *TraceConfig) ([]*txTraceResult, error) {
 	ret := m.Mock.MethodCalled("TraceBlockByNumber", number, config)
 	return ret[0].([]*txTraceResult), *ret[1].(*error)
@@ -79,15 +81,6 @@ func (m *mockHistoricalBackend) TraceTransaction(ctx context.Context, hash commo
 func (m *mockHistoricalBackend) ExpectTraceTransaction(hash common.Hash, config *TraceConfig, out interface{}, err error) {
 	jsonOut, _ := json.Marshal(out)
 	m.Mock.On("TraceTransaction", hash, config).Once().Return(json.RawMessage(jsonOut), &err)
-}
-
-func (m *mockHistoricalBackend) TraceCall(ctx context.Context, args ethapi.TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig) (interface{}, error) {
-	ret := m.Mock.MethodCalled("TraceCall", args, blockNrOrHash, config)
-	return ret[0], *ret[1].(*error)
-}
-
-func (m *mockHistoricalBackend) ExpectTraceCall(args ethapi.TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig, out interface{}, err error) {
-	m.Mock.On("TraceCall", args, blockNrOrHash, config).Once().Return(out, &err)
 }
 
 func newMockHistoricalBackend(t *testing.T, backend *mockHistoricalBackend) string {
@@ -195,7 +188,7 @@ func (b *testBackend) BlockByHash(ctx context.Context, hash common.Hash) (*types
 
 func (b *testBackend) BlockByNumber(ctx context.Context, number rpc.BlockNumber) (*types.Block, error) {
 	if number == rpc.PendingBlockNumber || number == rpc.LatestBlockNumber {
-		return b.chain.CurrentBlock(), nil
+		return b.chain.GetBlockByNumber(b.chain.CurrentBlock().Number.Uint64()), nil
 	}
 	return b.chain.GetBlockByNumber(uint64(number)), nil
 }
@@ -245,7 +238,7 @@ func (b *testBackend) StateAtBlock(ctx context.Context, block *types.Block, reex
 	return statedb, release, nil
 }
 
-func (b *testBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (core.Message, vm.BlockContext, *state.StateDB, StateReleaseFunc, error) {
+func (b *testBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (*core.Message, vm.BlockContext, *state.StateDB, StateReleaseFunc, error) {
 	parent := b.chain.GetBlock(block.ParentHash(), block.NumberU64()-1)
 	if parent == nil {
 		return nil, vm.BlockContext{}, nil, nil, errBlockNotFound
@@ -260,13 +253,12 @@ func (b *testBackend) StateAtTransaction(ctx context.Context, block *types.Block
 	// Recompute transactions up to the target index.
 	signer := types.MakeSigner(b.chainConfig, block.Number())
 	for idx, tx := range block.Transactions() {
-		msg, _ := tx.AsMessage(signer, block.BaseFee())
+		msg, _ := core.TransactionToMessage(tx, signer, block.BaseFee())
 		txContext := core.NewEVMTxContext(msg)
-		context := core.NewEVMBlockContext(block.Header(), b.chain, nil)
+		context := core.NewEVMBlockContext(block.Header(), b.chain, nil, b.chainConfig, statedb)
 		if idx == txIndex {
 			return msg, context, statedb, release, nil
 		}
-		context.L1CostFunc = types.NewL1CostFunc(b.chainConfig, statedb)
 		vmenv := vm.NewEVM(context, txContext, statedb, b.chainConfig, vm.Config{})
 		if _, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(tx.Gas())); err != nil {
 			return nil, vm.BlockContext{}, nil, nil, fmt.Errorf("transaction %#x failed: %v", tx.Hash(), err)
@@ -462,7 +454,7 @@ func TestTraceTransactionHistorical(t *testing.T) {
 	// Initialize test accounts
 	accounts := newAccounts(2)
 	genesis := &core.Genesis{
-		Config: params.AllOptimismProtocolChanges,
+		Config: params.OptimismTestConfig,
 		Alloc: core.GenesisAlloc{
 			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
 			accounts[1].addr: {Balance: big.NewInt(params.Ether)},
@@ -597,7 +589,7 @@ func TestTraceBlockHistorical(t *testing.T) {
 	// Initialize test accounts
 	accounts := newAccounts(3)
 	genesis := &core.Genesis{
-		Config: params.AllOptimismProtocolChanges,
+		Config: params.OptimismTestConfig,
 		Alloc: core.GenesisAlloc{
 			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
 			accounts[1].addr: {Balance: big.NewInt(params.Ether)},
@@ -648,12 +640,21 @@ func TestTracingWithOverrides(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
 	accounts := newAccounts(3)
+	storageAccount := common.Address{0x13, 37}
 	genesis := &core.Genesis{
 		Config: params.TestChainConfig,
 		Alloc: core.GenesisAlloc{
 			accounts[0].addr: {Balance: big.NewInt(params.Ether)},
 			accounts[1].addr: {Balance: big.NewInt(params.Ether)},
 			accounts[2].addr: {Balance: big.NewInt(params.Ether)},
+			// An account with existing storage
+			storageAccount: {
+				Balance: new(big.Int),
+				Storage: map[common.Hash]common.Hash{
+					common.HexToHash("0x03"): common.HexToHash("0x33"),
+					common.HexToHash("0x04"): common.HexToHash("0x44"),
+				},
+			},
 		},
 	}
 	genBlocks := 10
@@ -773,6 +774,164 @@ func TestTracingWithOverrides(t *testing.T) {
 			},
 			want: `{"gas":72666,"failed":false,"returnValue":"000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}`,
 		},
+		/*
+			pragma solidity =0.8.12;
+
+			contract Test {
+			    uint private x;
+
+			    function test2() external {
+			        x = 1337;
+			        revert();
+			    }
+
+			    function test() external returns (uint) {
+			        x = 1;
+			        try this.test2() {} catch (bytes memory) {}
+			        return x;
+			    }
+			}
+		*/
+		{ // First with only code override, not storage override
+			blockNumber: rpc.LatestBlockNumber,
+			call: ethapi.TransactionArgs{
+				From: &randomAccounts[0].addr,
+				To:   &randomAccounts[2].addr,
+				Data: newRPCBytes(common.Hex2Bytes("f8a8fd6d")), //
+			},
+			config: &TraceCallConfig{
+				StateOverrides: &ethapi.StateOverride{
+					randomAccounts[2].addr: ethapi.OverrideAccount{
+						Code: newRPCBytes(common.Hex2Bytes("6080604052348015600f57600080fd5b506004361060325760003560e01c806366e41cb7146037578063f8a8fd6d14603f575b600080fd5b603d6057565b005b60456062565b60405190815260200160405180910390f35b610539600090815580fd5b60006001600081905550306001600160a01b03166366e41cb76040518163ffffffff1660e01b8152600401600060405180830381600087803b15801560a657600080fd5b505af192505050801560b6575060015b60e9573d80801560e1576040519150601f19603f3d011682016040523d82523d6000602084013e60e6565b606091505b50505b506000549056fea26469706673582212205ce45de745a5308f713cb2f448589177ba5a442d1a2eff945afaa8915961b4d064736f6c634300080c0033")),
+					},
+				},
+			},
+			want: `{"gas":44100,"failed":false,"returnValue":"0000000000000000000000000000000000000000000000000000000000000001"}`,
+		},
+		{ // Same again, this time with storage override
+			blockNumber: rpc.LatestBlockNumber,
+			call: ethapi.TransactionArgs{
+				From: &randomAccounts[0].addr,
+				To:   &randomAccounts[2].addr,
+				Data: newRPCBytes(common.Hex2Bytes("f8a8fd6d")), //
+			},
+			config: &TraceCallConfig{
+				StateOverrides: &ethapi.StateOverride{
+					randomAccounts[2].addr: ethapi.OverrideAccount{
+						Code:  newRPCBytes(common.Hex2Bytes("6080604052348015600f57600080fd5b506004361060325760003560e01c806366e41cb7146037578063f8a8fd6d14603f575b600080fd5b603d6057565b005b60456062565b60405190815260200160405180910390f35b610539600090815580fd5b60006001600081905550306001600160a01b03166366e41cb76040518163ffffffff1660e01b8152600401600060405180830381600087803b15801560a657600080fd5b505af192505050801560b6575060015b60e9573d80801560e1576040519150601f19603f3d011682016040523d82523d6000602084013e60e6565b606091505b50505b506000549056fea26469706673582212205ce45de745a5308f713cb2f448589177ba5a442d1a2eff945afaa8915961b4d064736f6c634300080c0033")),
+						State: newStates([]common.Hash{{}}, []common.Hash{{}}),
+					},
+				},
+			},
+			//want: `{"gas":46900,"failed":false,"returnValue":"0000000000000000000000000000000000000000000000000000000000000539"}`,
+			want: `{"gas":44100,"failed":false,"returnValue":"0000000000000000000000000000000000000000000000000000000000000001"}`,
+		},
+		{ // No state override
+			blockNumber: rpc.LatestBlockNumber,
+			call: ethapi.TransactionArgs{
+				From: &randomAccounts[0].addr,
+				To:   &storageAccount,
+				Data: newRPCBytes(common.Hex2Bytes("f8a8fd6d")), //
+			},
+			config: &TraceCallConfig{
+				StateOverrides: &ethapi.StateOverride{
+					storageAccount: ethapi.OverrideAccount{
+						Code: newRPCBytes([]byte{
+							// SLOAD(3) + SLOAD(4) (which is 0x77)
+							byte(vm.PUSH1), 0x04,
+							byte(vm.SLOAD),
+							byte(vm.PUSH1), 0x03,
+							byte(vm.SLOAD),
+							byte(vm.ADD),
+							// 0x77 -> MSTORE(0)
+							byte(vm.PUSH1), 0x00,
+							byte(vm.MSTORE),
+							// RETURN (0, 32)
+							byte(vm.PUSH1), 32,
+							byte(vm.PUSH1), 00,
+							byte(vm.RETURN),
+						}),
+					},
+				},
+			},
+			want: `{"gas":25288,"failed":false,"returnValue":"0000000000000000000000000000000000000000000000000000000000000077"}`,
+		},
+		{ // Full state override
+			// The original storage is
+			// 3: 0x33
+			// 4: 0x44
+			// With a full override, where we set 3:0x11, the slot 4 should be
+			// removed. So SLOT(3)+SLOT(4) should be 0x11.
+			blockNumber: rpc.LatestBlockNumber,
+			call: ethapi.TransactionArgs{
+				From: &randomAccounts[0].addr,
+				To:   &storageAccount,
+				Data: newRPCBytes(common.Hex2Bytes("f8a8fd6d")), //
+			},
+			config: &TraceCallConfig{
+				StateOverrides: &ethapi.StateOverride{
+					storageAccount: ethapi.OverrideAccount{
+						Code: newRPCBytes([]byte{
+							// SLOAD(3) + SLOAD(4) (which is now 0x11 + 0x00)
+							byte(vm.PUSH1), 0x04,
+							byte(vm.SLOAD),
+							byte(vm.PUSH1), 0x03,
+							byte(vm.SLOAD),
+							byte(vm.ADD),
+							// 0x11 -> MSTORE(0)
+							byte(vm.PUSH1), 0x00,
+							byte(vm.MSTORE),
+							// RETURN (0, 32)
+							byte(vm.PUSH1), 32,
+							byte(vm.PUSH1), 00,
+							byte(vm.RETURN),
+						}),
+						State: newStates(
+							[]common.Hash{common.HexToHash("0x03")},
+							[]common.Hash{common.HexToHash("0x11")}),
+					},
+				},
+			},
+			want: `{"gas":25288,"failed":false,"returnValue":"0000000000000000000000000000000000000000000000000000000000000011"}`,
+		},
+		{ // Partial state override
+			// The original storage is
+			// 3: 0x33
+			// 4: 0x44
+			// With a partial override, where we set 3:0x11, the slot 4 as before.
+			// So SLOT(3)+SLOT(4) should be 0x55.
+			blockNumber: rpc.LatestBlockNumber,
+			call: ethapi.TransactionArgs{
+				From: &randomAccounts[0].addr,
+				To:   &storageAccount,
+				Data: newRPCBytes(common.Hex2Bytes("f8a8fd6d")), //
+			},
+			config: &TraceCallConfig{
+				StateOverrides: &ethapi.StateOverride{
+					storageAccount: ethapi.OverrideAccount{
+						Code: newRPCBytes([]byte{
+							// SLOAD(3) + SLOAD(4) (which is now 0x11 + 0x44)
+							byte(vm.PUSH1), 0x04,
+							byte(vm.SLOAD),
+							byte(vm.PUSH1), 0x03,
+							byte(vm.SLOAD),
+							byte(vm.ADD),
+							// 0x55 -> MSTORE(0)
+							byte(vm.PUSH1), 0x00,
+							byte(vm.MSTORE),
+							// RETURN (0, 32)
+							byte(vm.PUSH1), 32,
+							byte(vm.PUSH1), 00,
+							byte(vm.RETURN),
+						}),
+						StateDiff: &map[common.Hash]common.Hash{
+							common.HexToHash("0x03"): common.HexToHash("0x11"),
+						},
+					},
+				},
+			},
+			want: `{"gas":25288,"failed":false,"returnValue":"0000000000000000000000000000000000000000000000000000000000000055"}`,
+		},
 	}
 	for i, tc := range testSuite {
 		result, err := api.TraceCall(context.Background(), tc.call, rpc.BlockNumberOrHash{BlockNumber: &tc.blockNumber}, tc.config)
@@ -799,7 +958,8 @@ func TestTracingWithOverrides(t *testing.T) {
 		json.Unmarshal(resBytes, &have)
 		json.Unmarshal([]byte(tc.want), &want)
 		if !reflect.DeepEqual(have, want) {
-			t.Errorf("test %d, result mismatch, have\n%v\n, want\n%v\n", i, string(resBytes), want)
+			t.Logf("result: %v\n", string(resBytes))
+			t.Errorf("test %d, result mismatch, have\n%v\n, want\n%v\n", i, have, want)
 		}
 	}
 }

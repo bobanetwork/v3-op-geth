@@ -52,8 +52,8 @@ func (b *LesApiBackend) ChainConfig() *params.ChainConfig {
 	return b.eth.chainConfig
 }
 
-func (b *LesApiBackend) CurrentBlock() *types.Block {
-	return types.NewBlockWithHeader(b.eth.BlockChain().CurrentHeader())
+func (b *LesApiBackend) CurrentBlock() *types.Header {
+	return b.eth.BlockChain().CurrentHeader()
 }
 
 func (b *LesApiBackend) SetHead(number uint64) {
@@ -130,6 +130,10 @@ func (b *LesApiBackend) BlockByNumberOrHash(ctx context.Context, blockNrOrHash r
 	return nil, errors.New("invalid arguments; neither block nor hash specified")
 }
 
+func (b *LesApiBackend) GetBody(ctx context.Context, hash common.Hash, number rpc.BlockNumber) (*types.Body, error) {
+	return light.GetBody(ctx, b.eth.odr, hash, uint64(number))
+}
+
 func (b *LesApiBackend) PendingBlockAndReceipts() (*types.Block, types.Receipts) {
 	return nil, nil
 }
@@ -180,13 +184,12 @@ func (b *LesApiBackend) GetTd(ctx context.Context, hash common.Hash) *big.Int {
 	return nil
 }
 
-func (b *LesApiBackend) GetEVM(ctx context.Context, msg core.Message, state *state.StateDB, header *types.Header, vmConfig *vm.Config) (*vm.EVM, func() error, error) {
+func (b *LesApiBackend) GetEVM(ctx context.Context, msg *core.Message, state *state.StateDB, header *types.Header, vmConfig *vm.Config) (*vm.EVM, func() error, error) {
 	if vmConfig == nil {
 		vmConfig = new(vm.Config)
 	}
 	txContext := core.NewEVMTxContext(msg)
-	context := core.NewEVMBlockContext(header, b.eth.blockchain, nil)
-	context.L1CostFunc = types.NewL1CostFunc(b.eth.chainConfig, state)
+	context := core.NewEVMBlockContext(header, b.eth.blockchain, nil, b.eth.chainConfig, state)
 	return vm.NewEVM(context, txContext, state, b.eth.chainConfig, *vmConfig), state.Error, nil
 }
 
@@ -327,7 +330,7 @@ func (b *LesApiBackend) StateAtBlock(ctx context.Context, block *types.Block, re
 	return b.eth.stateAtBlock(ctx, block, reexec)
 }
 
-func (b *LesApiBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (core.Message, vm.BlockContext, *state.StateDB, tracers.StateReleaseFunc, error) {
+func (b *LesApiBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (*core.Message, vm.BlockContext, *state.StateDB, tracers.StateReleaseFunc, error) {
 	return b.eth.stateAtTransaction(ctx, block, txIndex, reexec)
 }
 

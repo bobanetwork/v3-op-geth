@@ -19,11 +19,12 @@ package types
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // txJSON is the JSON representation of transactions.
@@ -282,9 +283,17 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			}
 		}
 	case DepositTxType:
-		if dec.AccessList != nil || dec.V != nil || dec.R != nil || dec.S != nil || dec.MaxFeePerGas != nil ||
-			dec.MaxPriorityFeePerGas != nil || dec.GasPrice != nil || (dec.Nonce != nil && *dec.Nonce != 0) {
+		if dec.AccessList != nil || dec.MaxFeePerGas != nil ||
+			dec.MaxPriorityFeePerGas != nil {
 			return errors.New("unexpected field(s) in deposit transaction")
+		}
+		if dec.GasPrice != nil && dec.GasPrice.ToInt().Cmp(common.Big0) != 0 {
+			return errors.New("deposit transaction GasPrice must be 0")
+		}
+		if (dec.V != nil && dec.V.ToInt().Cmp(common.Big0) != 0) ||
+			(dec.R != nil && dec.R.ToInt().Cmp(common.Big0) != 0) ||
+			(dec.S != nil && dec.S.ToInt().Cmp(common.Big0) != 0) {
+			return errors.New("deposit transaction signature must be 0 or unset")
 		}
 		var itx DepositTx
 		inner = &itx
@@ -317,7 +326,10 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.IsSystemTx != nil {
 			itx.IsSystemTransaction = *dec.IsSystemTx
 		}
-		// DEBUG level messages are not printed from op-geth when called by op-node
+
+		if dec.Nonce != nil {
+			inner = &depositTxWithNonce{DepositTx: itx, EffectiveNonce: uint64(*dec.Nonce)}
+		}
 		log.Info("MMDBG op-geth parsed DepositTransaction", "itx", itx)
 	default:
 		return ErrTxTypeNotSupported
@@ -329,3 +341,15 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 	// TODO: check hash here?
 	return nil
 }
+
+type depositTxWithNonce struct {
+	DepositTx
+	EffectiveNonce uint64
+}
+
+// EncodeRLP ensures that RLP encoding this transaction excludes the nonce. Otherwise, the tx Hash would change
+func (tx *depositTxWithNonce) EncodeRLP(w io.Writer) error {
+	return rlp.Encode(w, tx.DepositTx)
+}
+
+func (tx *depositTxWithNonce) effectiveNonce() *uint64 { return &tx.EffectiveNonce }
