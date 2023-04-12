@@ -78,6 +78,10 @@ func (tx *OffchainTx) nonce() uint64          { return 0 }
 func (tx *OffchainTx) to() *common.Address    { return tx.To }
 func (tx *OffchainTx) isSystemTx() bool       { return tx.IsSystemTransaction }
 
+func (tx *OffchainTx) effectiveGasPrice(dst *big.Int, baseFee *big.Int) *big.Int {
+	return dst.Set(new(big.Int))
+}
+
 func (tx *OffchainTx) rawSignatureValues() (v, r, s *big.Int) {
 	return common.Big0, common.Big0, common.Big0
 }
