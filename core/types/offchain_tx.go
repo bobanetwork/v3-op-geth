@@ -31,10 +31,6 @@ type OffchainTx struct {
 	From common.Address
 	// nil means contract creation
 	To *common.Address `rlp:"nil"`
-	// Mint is minted on L2, locked on L1, nil if no minting.
-	Mint *big.Int `rlp:"nil"`
-	// Value is transferred from L2 balance, executed after Mint (if any)
-	Value *big.Int
 	// gas limit
 	Gas uint64
 	// Field indicating if this transaction is exempt from the L2 gas limit.
@@ -49,17 +45,9 @@ func (tx *OffchainTx) copy() TxData {
 		SourceHash:          tx.SourceHash,
 		From:                tx.From,
 		To:                  copyAddressPtr(tx.To),
-		Mint:                nil,
-		Value:               new(big.Int),
 		Gas:                 tx.Gas,
 		IsSystemTransaction: tx.IsSystemTransaction,
 		Data:                common.CopyBytes(tx.Data),
-	}
-	if tx.Mint != nil {
-		cpy.Mint = new(big.Int).Set(tx.Mint)
-	}
-	if tx.Value != nil {
-		cpy.Value.Set(tx.Value)
 	}
 	return cpy
 }
@@ -73,9 +61,12 @@ func (tx *OffchainTx) gas() uint64            { return tx.Gas }
 func (tx *OffchainTx) gasFeeCap() *big.Int    { return new(big.Int) }
 func (tx *OffchainTx) gasTipCap() *big.Int    { return new(big.Int) }
 func (tx *OffchainTx) gasPrice() *big.Int     { return new(big.Int) }
-func (tx *OffchainTx) value() *big.Int        { return tx.Value }
+func (tx *OffchainTx) value() *big.Int        { return new(big.Int) }
 func (tx *OffchainTx) nonce() uint64          { return 0 }
 func (tx *OffchainTx) to() *common.Address    { return tx.To }
+func (tx *OffchainTx) blobGas() uint64           { return 0 }
+func (tx *OffchainTx) blobGasFeeCap() *big.Int   { return nil }
+func (tx *OffchainTx) blobHashes() []common.Hash { return nil }
 func (tx *OffchainTx) isSystemTx() bool       { return tx.IsSystemTransaction }
 
 func (tx *OffchainTx) effectiveGasPrice(dst *big.Int, baseFee *big.Int) *big.Int {

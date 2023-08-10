@@ -431,13 +431,10 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.Value == nil {
 			return errors.New("missing required field 'value' in transaction")
 		}
-		itx.Value = (*big.Int)(dec.Value)
-		// mint may be omitted or nil if there is nothing to mint.
-		itx.Mint = (*big.Int)(dec.Mint)
-		if dec.Data == nil {
+		if dec.Input == nil {
 			return errors.New("missing required field 'input' in transaction")
 		}
-		itx.Data = *dec.Data
+		itx.Data = *dec.Input
 		if dec.From == nil {
 			return errors.New("missing required field 'from' in transaction")
 		}
