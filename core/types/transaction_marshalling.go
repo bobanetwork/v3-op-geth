@@ -413,7 +413,7 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.Nonce != nil {
 			inner = &depositTxWithNonce{DepositTx: itx, EffectiveNonce: uint64(*dec.Nonce)}
 		}
-		log.Info("MMDBG op-geth parsed DepositTransaction", "itx", itx)
+		log.Info("op-geth parsed DepositTransaction", "itx", itx)
 	default:
 		return ErrTxTypeNotSupported
 	}
