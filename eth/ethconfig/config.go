@@ -38,12 +38,13 @@ import (
 
 // FullNodeGPO contains default gasprice oracle settings for full node.
 var FullNodeGPO = gasprice.Config{
-	Blocks:           20,
-	Percentile:       60,
-	MaxHeaderHistory: 1024,
-	MaxBlockHistory:  1024,
-	MaxPrice:         gasprice.DefaultMaxPrice,
-	IgnorePrice:      gasprice.DefaultIgnorePrice,
+	Blocks:                  20,
+	Percentile:              60,
+	MaxHeaderHistory:        1024,
+	MaxBlockHistory:         1024,
+	MaxPrice:                gasprice.DefaultMaxPrice,
+	IgnorePrice:             gasprice.DefaultIgnorePrice,
+	MinSuggestedPriorityFee: gasprice.DefaultMinSuggestedPriorityFee,
 }
 
 // LightClientGPO contains default gasprice oracle settings for light client.
@@ -168,10 +169,12 @@ type Config struct {
 	OverrideOptimismRegolith *uint64 `toml:",omitempty"`
 	OverrideOptimism         *bool
 
-	RollupSequencerHTTP        string
-	RollupHistoricalRPC        string
-	RollupHistoricalRPCTimeout time.Duration
-	RollupDisableTxPoolGossip  bool
+	RollupSequencerHTTP                     string
+	RollupHistoricalRPC                     string
+	RollupHistoricalRPCTimeout              time.Duration
+	RollupDisableTxPoolGossip               bool
+	RollupDisableTxPoolAdmission            bool
+	RollupHaltOnIncompatibleProtocolVersion string
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain config.
