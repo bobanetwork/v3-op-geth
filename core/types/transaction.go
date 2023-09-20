@@ -209,6 +209,10 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		var inner DepositTx
 		err := rlp.DecodeBytes(b[1:], &inner)
 		return &inner, err
+	case OffchainTxType:
+		var inner OffchainTx
+		err := rlp.DecodeBytes(b[1:], &inner)
+		return &inner, err
 	default:
 		return nil, ErrTxTypeNotSupported
 	}
