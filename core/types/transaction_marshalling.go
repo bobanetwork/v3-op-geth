@@ -475,9 +475,17 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		}
 		log.Info("op-geth parsed DepositTransaction", "itx", itx)
 	case OffchainTxType:
-		if dec.AccessList != nil || dec.V != nil || dec.R != nil || dec.S != nil || dec.MaxFeePerGas != nil ||
-			dec.MaxPriorityFeePerGas != nil || dec.GasPrice != nil || (dec.Nonce != nil && *dec.Nonce != 0) {
+		if dec.AccessList != nil || dec.MaxFeePerGas != nil ||
+			dec.MaxPriorityFeePerGas != nil {
 			return errors.New("unexpected field(s) in offchain transaction")
+		}
+		if dec.GasPrice != nil && dec.GasPrice.ToInt().Cmp(common.Big0) != 0 {
+			return errors.New("offchain transaction GasPrice must be 0")
+		}
+		if (dec.V != nil && dec.V.ToInt().Cmp(common.Big0) != 0) ||
+			(dec.R != nil && dec.R.ToInt().Cmp(common.Big0) != 0) ||
+			(dec.S != nil && dec.S.ToInt().Cmp(common.Big0) != 0) {
+			return errors.New("offchain transaction signature must be 0 or unset")
 		}
 		var itx OffchainTx
 		inner = &itx
@@ -488,9 +496,6 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			return errors.New("missing required field 'gas' for txdata")
 		}
 		itx.Gas = uint64(*dec.Gas)
-		if dec.Value == nil {
-			return errors.New("missing required field 'value' in transaction")
-		}
 		if dec.Input == nil {
 			return errors.New("missing required field 'input' in transaction")
 		}
@@ -503,10 +508,6 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			return errors.New("missing required field 'sourceHash' in transaction")
 		}
 		itx.SourceHash = *dec.SourceHash
-		// IsSystemTx may be omitted. Defaults to false.
-		if dec.IsSystemTx != nil {
-			itx.IsSystemTransaction = *dec.IsSystemTx
-		}
 		// DEBUG level messages are not printed from op-geth when called by op-node
 		log.Info("op-geth parsed OffchainTransaction", "itx", itx)
 	default:

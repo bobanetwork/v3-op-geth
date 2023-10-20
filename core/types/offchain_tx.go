@@ -27,7 +27,7 @@ import (
 const OffchainTxType = 0x7D
 
 type OffchainTx struct {
-	// SourceHash uniquely identifies the source of the deposit
+	// SourceHash uniquely identifies the source of the offchain tx
 	SourceHash common.Hash
 	// From is exposed through the types.Signer, not through TxData
 	From common.Address
@@ -35,8 +35,6 @@ type OffchainTx struct {
 	To *common.Address `rlp:"nil"`
 	// gas limit
 	Gas uint64
-	// Field indicating if this transaction is exempt from the L2 gas limit.
-	IsSystemTransaction bool
 	// Normal Tx data
 	Data []byte
 }
@@ -48,7 +46,6 @@ func (tx *OffchainTx) copy() TxData {
 		From:                tx.From,
 		To:                  copyAddressPtr(tx.To),
 		Gas:                 tx.Gas,
-		IsSystemTransaction: tx.IsSystemTransaction,
 		Data:                common.CopyBytes(tx.Data),
 	}
 	return cpy
@@ -69,7 +66,7 @@ func (tx *OffchainTx) to() *common.Address    { return tx.To }
 func (tx *OffchainTx) blobGas() uint64           { return 0 }
 func (tx *OffchainTx) blobGasFeeCap() *big.Int   { return nil }
 func (tx *OffchainTx) blobHashes() []common.Hash { return nil }
-func (tx *OffchainTx) isSystemTx() bool       { return tx.IsSystemTransaction }
+func (tx *OffchainTx) isSystemTx() bool       { return false }
 
 func (tx *OffchainTx) effectiveGasPrice(dst *big.Int, baseFee *big.Int) *big.Int {
 	return dst.Set(new(big.Int))
@@ -80,7 +77,7 @@ func (tx *OffchainTx) rawSignatureValues() (v, r, s *big.Int) {
 }
 
 func (tx *OffchainTx) setSignatureValues(chainID, v, r, s *big.Int) {
-	// this is a noop for deposit transactions
+	// this is a noop for offchain transactions
 }
 
 func (tx *OffchainTx) encode(b *bytes.Buffer) error {
