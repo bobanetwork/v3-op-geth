@@ -4,13 +4,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 
 	"github.com/ethereum-optimism/superchain-registry/superchain"
 	"github.com/ethereum/go-ethereum/common"
 )
 
-var OPStackSupport = ProtocolVersionV0{Build: [8]byte{}, Major: 3, Minor: 1, Patch: 0, PreRelease: 1}.Encode()
+var OPStackSupport = ProtocolVersionV0{Build: [8]byte{}, Major: 3, Minor: 1, Patch: 0, PreRelease: 0}.Encode()
 
 func init() {
 	for id, ch := range superchain.OPChains {
@@ -25,6 +26,14 @@ func OPStackChainIDByName(name string) (uint64, error) {
 		}
 	}
 	return 0, fmt.Errorf("unknown chain %q", name)
+}
+
+func OPStackChainNames() (out []string) {
+	for _, ch := range superchain.OPChains {
+		out = append(out, ch.Chain+"-"+ch.Superchain)
+	}
+	sort.Strings(out)
+	return
 }
 
 func LoadOPStackChainConfig(chainID uint64) (*ChainConfig, error) {
@@ -187,6 +196,7 @@ const (
 	DiffVersionType    ProtocolVersionComparison = 100
 	DiffBuild          ProtocolVersionComparison = 101
 	EmptyVersion       ProtocolVersionComparison = 102
+	InvalidVersion     ProtocolVersionComparison = 103
 )
 
 func (p ProtocolVersion) Compare(other ProtocolVersion) (cmp ProtocolVersionComparison) {
@@ -201,6 +211,11 @@ func (p ProtocolVersion) Compare(other ProtocolVersion) (cmp ProtocolVersionComp
 	if aBuild != bBuild {
 		return DiffBuild
 	}
+	// max values are reserved, consider versions with these values invalid
+	if aMajor == ^uint32(0) || aMinor == ^uint32(0) || aPatch == ^uint32(0) || aPreRelease == ^uint32(0) ||
+		bMajor == ^uint32(0) || bMinor == ^uint32(0) || bPatch == ^uint32(0) || bPreRelease == ^uint32(0) {
+		return InvalidVersion
+	}
 	fn := func(a, b uint32, ahead, outdated ProtocolVersionComparison) ProtocolVersionComparison {
 		if a == b {
 			return Matching
@@ -209,6 +224,28 @@ func (p ProtocolVersion) Compare(other ProtocolVersion) (cmp ProtocolVersionComp
 			return ahead
 		}
 		return outdated
+	}
+	if aPreRelease != 0 { // if A is a pre-release, then decrement the version before comparison
+		if aPatch != 0 {
+			aPatch -= 1
+		} else if aMinor != 0 {
+			aMinor -= 1
+			aPatch = ^uint32(0) // max value
+		} else if aMajor != 0 {
+			aMajor -= 1
+			aMinor = ^uint32(0) // max value
+		}
+	}
+	if bPreRelease != 0 { // if B is a pre-release, then decrement the version before comparison
+		if bPatch != 0 {
+			bPatch -= 1
+		} else if bMinor != 0 {
+			bMinor -= 1
+			bPatch = ^uint32(0) // max value
+		} else if bMajor != 0 {
+			bMajor -= 1
+			bMinor = ^uint32(0) // max value
+		}
 	}
 	if c := fn(aMajor, bMajor, AheadMajor, OutdatedMajor); c != Matching {
 		return c

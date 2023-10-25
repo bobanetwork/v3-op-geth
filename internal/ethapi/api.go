@@ -1077,13 +1077,14 @@ func (diff *StateOverride) Apply(state *state.StateDB) error {
 
 // BlockOverrides is a set of header fields to override.
 type BlockOverrides struct {
-	Number     *hexutil.Big
-	Difficulty *hexutil.Big
-	Time       *hexutil.Uint64
-	GasLimit   *hexutil.Uint64
-	Coinbase   *common.Address
-	Random     *common.Hash
-	BaseFee    *hexutil.Big
+	Number      *hexutil.Big
+	Difficulty  *hexutil.Big
+	Time        *hexutil.Uint64
+	GasLimit    *hexutil.Uint64
+	Coinbase    *common.Address
+	Random      *common.Hash
+	BaseFee     *hexutil.Big
+	BlobBaseFee *hexutil.Big
 }
 
 // Apply overrides the given header fields into the given block context.
@@ -1111,6 +1112,9 @@ func (diff *BlockOverrides) Apply(blockCtx *vm.BlockContext) {
 	}
 	if diff.BaseFee != nil {
 		blockCtx.BaseFee = diff.BaseFee.ToInt()
+	}
+	if diff.BlobBaseFee != nil {
+		blockCtx.BlobBaseFee = diff.BlobBaseFee.ToInt()
 	}
 }
 
@@ -1244,8 +1248,13 @@ func (e *revertError) ErrorData() interface{} {
 //
 // Note, this function doesn't make and changes in the state/blockchain and is
 // useful to execute and retrieve values.
-func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, blockOverrides *BlockOverrides) (hexutil.Bytes, error) {
-	header, err := headerByNumberOrHash(ctx, s.b, blockNrOrHash)
+func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrOrHash *rpc.BlockNumberOrHash, overrides *StateOverride, blockOverrides *BlockOverrides) (hexutil.Bytes, error) {
+	if blockNrOrHash == nil {
+		latest := rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber)
+		blockNrOrHash = &latest
+	}
+
+	header, err := headerByNumberOrHash(ctx, s.b, *blockNrOrHash)
 	if err != nil {
 		return nil, err
 	}
@@ -1263,7 +1272,7 @@ func (s *BlockChainAPI) Call(ctx context.Context, args TransactionArgs, blockNrO
 		}
 	}
 
-	result, err := DoCall(ctx, s.b, args, blockNrOrHash, overrides, blockOverrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
+	result, err := DoCall(ctx, s.b, args, *blockNrOrHash, overrides, blockOverrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
 	if err != nil {
 		return nil, err
 	}
@@ -1567,6 +1576,8 @@ type RPCTransaction struct {
 	SourceHash *common.Hash `json:"sourceHash,omitempty"`
 	Mint       *hexutil.Big `json:"mint,omitempty"`
 	IsSystemTx *bool        `json:"isSystemTx,omitempty"`
+	// deposit-tx post-Canyon only
+	DepositReceiptVersion *hexutil.Uint64 `json:"depositReceiptVersion,omitempty"`
 }
 
 // newRPCTransaction returns a transaction that will serialize to the RPC
@@ -1607,6 +1618,10 @@ func newRPCTransaction(tx *types.Transaction, blockHash common.Hash, blockNumber
 		result.Mint = (*hexutil.Big)(tx.Mint())
 		if receipt != nil && receipt.DepositNonce != nil {
 			result.Nonce = hexutil.Uint64(*receipt.DepositNonce)
+			if receipt.DepositReceiptVersion != nil {
+				result.DepositReceiptVersion = new(hexutil.Uint64)
+				*result.DepositReceiptVersion = hexutil.Uint64(*receipt.DepositReceiptVersion)
+			}
 		}
 	case types.LegacyTxType:
 		if v.Sign() == 0 && r.Sign() == 0 && s.Sign() == 0 { // pre-bedrock relayed tx does not have a signature
@@ -2026,6 +2041,9 @@ func marshalReceipt(receipt *types.Receipt, blockHash common.Hash, blockNumber u
 	}
 	if chainConfig.Optimism != nil && tx.IsDepositTx() && receipt.DepositNonce != nil {
 		fields["depositNonce"] = hexutil.Uint64(*receipt.DepositNonce)
+		if receipt.DepositReceiptVersion != nil {
+			fields["depositReceiptVersion"] = hexutil.Uint64(*receipt.DepositReceiptVersion)
+		}
 	}
 
 	// Assign receipt status or post state.
@@ -2395,20 +2413,23 @@ func (api *DebugAPI) PrintBlock(ctx context.Context, number uint64) (string, err
 
 // ChaindbProperty returns leveldb properties of the key-value database.
 func (api *DebugAPI) ChaindbProperty(property string) (string, error) {
-	if property == "" {
-		property = "leveldb.stats"
-	} else if !strings.HasPrefix(property, "leveldb.") {
-		property = "leveldb." + property
-	}
 	return api.b.ChainDb().Stat(property)
 }
 
 // ChaindbCompact flattens the entire key-value database into a single level,
 // removing all unused slots and merging all keys.
 func (api *DebugAPI) ChaindbCompact() error {
-	for b := byte(0); b < 255; b++ {
-		log.Info("Compacting chain database", "range", fmt.Sprintf("0x%0.2X-0x%0.2X", b, b+1))
-		if err := api.b.ChainDb().Compact([]byte{b}, []byte{b + 1}); err != nil {
+	cstart := time.Now()
+	for b := 0; b <= 255; b++ {
+		var (
+			start = []byte{byte(b)}
+			end   = []byte{byte(b + 1)}
+		)
+		if b == 255 {
+			end = nil
+		}
+		log.Info("Compacting database", "range", fmt.Sprintf("%#X-%#X", start, end), "elapsed", common.PrettyDuration(time.Since(cstart)))
+		if err := api.b.ChainDb().Compact(start, end); err != nil {
 			log.Error("Database compaction failed", "err", err)
 			return err
 		}
